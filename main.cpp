@@ -1,0 +1,173 @@
+#define GLM_ENABLE_EXPERIMENTAL
+#include<iostream>
+#include<glad//glad.h>
+#include<GLFW/glfw3.h>
+#include<stb/stb_image.h>
+#include<glm/glm.hpp>
+#include<glm/gtx/norm.hpp>
+#include<glm/gtc//matrix_transform.hpp>
+#include<glm/gtc/type_ptr.hpp>
+#include<cstdlib>
+
+// Подключение кастомных абстракций (RAII/Wrapper-классов над объектами OpenGL)
+#include"shaderClass.h"
+#include"Camera.h"
+#include"Cube.h"
+#include"Texture.h"
+#include"Chunk.h"
+#include"Raycast.h"
+#include"InputSystem.h"
+#include"TreeGeneration.h"
+#include"World.h"
+#include"VAO.h"
+#include"Tools.h"
+
+float uiVertices[] = {
+	// Координаты X, Y
+	-1.0f,  1.0f,
+	-1.0f, -1.0f,
+	 1.0f, -1.0f,
+
+	-1.0f,  1.0f,
+	 1.0f, -1.0f,
+	 1.0f,  1.0f
+};
+
+int main()
+{
+	system("chcp 1251 > nul"); // Локализация вывода консоли (кодовая страница Windows-1251)
+
+	srand(static_cast<unsigned int>(time(0)));
+
+	glfwInit(); // Инициализация подсистемы GLFW
+
+	// Конфигурация контекста дескриптора окна (OpenGL 3.3 Core Profile)
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE); // Отсечение deprecated-функционала
+
+	int WIDTH = 1920;
+	int HEIGHT = 1080;
+
+	GLfloat backgroundColor[] = { 70.0f/255.0f, 126.0f/255.0f, 199.0f/255.0f }; // Нормализованные RGBA значения цвета очистки
+
+	// Инстанцирование объекта окна и создание ассоциированного контекста OpenGL
+	GLFWwindow* window = glfwCreateWindow(WIDTH, HEIGHT, "Smoke'nCraft", NULL, NULL);
+
+	if (window == NULL) {
+		std::cout << "Failed to create a window" << std::endl;
+		glfwTerminate();
+		return -1;
+	}
+
+	glfwMakeContextCurrent(window); // Привязка контекста OpenGL к текущему потоку выполнения
+
+	gladLoadGL(); // Динамическая загрузка указателей на функции API OpenGL через GLAD
+
+	glViewport(0, 0, WIDTH, HEIGHT); // Задание матрицы преобразования координат в пиксели окна (NDC to Window Space)
+
+	// Инициализация графического конвейера (компиляция и линковка шейдеров)
+	Shader shaderProgram("default.vert", "default.frag");
+	Shader uiShader("drugEffect.vert", "drugEffect.frag");
+
+	VAO VAO1;
+	VAO1.Bind();
+	VBO VBO1(uiVertices, sizeof(uiVertices));
+	VAO1.LinkAttrib(VBO1, 0, 2, GL_FLOAT, 2 * sizeof(float), (void*)0);
+	VAO1.Unbind();
+	VBO1.Unbind();
+
+	//Face culling
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+	glFrontFace(GL_CCW);
+
+	Camera camera(WIDTH, HEIGHT, glm::vec3(0.0f, 40.0f, 2.0f));
+	InputSystem inputSystem;
+
+	double lastTime = glfwGetTime();
+
+	Texture chunkText("textures.png", GL_TEXTURE_2D, GL_TEXTURE0, GL_UNSIGNED_BYTE);
+	chunkText.texIUnit(shaderProgram, "tex0", 0);
+
+	World newWorld;
+	newWorld.world.reserve(1000);
+
+	newWorld.GenerateWorld();
+
+	float chunkDistance = 12;
+
+	GLuint timeID = glGetUniformLocation(shaderProgram.ID, "time");
+	GLuint time = glGetUniformLocation(uiShader.ID, "time");
+
+	// Основной цикл обработки сообщений и рендеринга (Render Loop)
+	while (!glfwWindowShouldClose(window))
+	{
+		glEnable(GL_DEPTH_TEST);
+
+		// Заполнение буфера кадра заданным цветом (Clear Color Stage)
+		glClearColor(backgroundColor[0], backgroundColor[1], backgroundColor[2], 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); // Инвалидация и очистка цветового буфера
+
+		shaderProgram.Activate(); // Инжект шейдерной программы в текущий пайплайн
+
+		//Дельта тайм
+		double curTime = glfwGetTime();
+		float deltaTime = (float)(curTime - lastTime);
+		lastTime = curTime;
+
+		float currentTime = glfwGetTime(); // Получение дельты времени в секундах
+		glUniform1f(timeID, currentTime);
+
+		//Камера
+		camera.Inputs(window, deltaTime);
+		camera.Matrix(45.0f, 0.1f, 2000.0f, shaderProgram, "camMatrix");
+
+		inputSystem.Placement(window, newWorld.world, camera);
+		inputSystem.Destruction(window, newWorld.world, camera);
+
+		chunkText.Bind();
+
+		newWorld.DrawWorld(chunkDistance, shaderProgram, camera);
+
+		int camX = Tools::NormalizeIntForChunk(camera.Position.x);
+		int camZ = Tools::NormalizeIntForChunk(camera.Position.z);
+
+		for (int x = -chunkDistance; x <= chunkDistance; x++) {
+			for (int z = -chunkDistance; z <= chunkDistance; z++) {
+				if (x * x + z * z <= chunkDistance * chunkDistance) {
+
+					int targetX = camX + x;
+					int targetZ = camZ + z;
+
+					newWorld.CreateChunk(targetX, targetZ);
+				}
+			}
+		}
+
+		/*glDisable(GL_DEPTH_TEST);
+
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		uiShader.Activate();
+
+		glUniform1f(time, currentTime);
+
+		VAO1.Bind();
+		glDrawArrays(GL_TRIANGLES, 0, 6);*/
+
+		glfwSwapBuffers(window); // Смена переднего и заднего буферов (Double Buffering)
+
+		glfwPollEvents(); // Опрос системной очереди событий (ввод, изменение геометрии окна)
+	}
+
+	VAO1.Delete();
+	VBO1.Delete();
+	chunkText.Delete();
+	shaderProgram.Delete();
+	uiShader.Delete();
+
+	glfwDestroyWindow(window); // Уничтожение дескриптора окна
+	glfwTerminate();           // Корректное завершение работы подсистемы GLFW
+	return 0;
+}
